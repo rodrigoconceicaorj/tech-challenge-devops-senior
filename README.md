@@ -34,6 +34,25 @@ python api/app.py
 
 A API estará disponível em `http://localhost:5000`
 
+## Banco local com Docker
+
+- Subir Postgres:
+```
+docker compose up -d postgres
+```
+- Ver status:
+```
+docker compose ps
+```
+- Variáveis usadas pela API (`.env`):
+```
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=commentsdb
+DB_USER=commentsuser
+DB_PASSWORD=commentspass
+```
+
 ### Endpoints disponíveis
 
 - `GET /health` - Health check
