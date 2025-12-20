@@ -10,6 +10,7 @@ env/
 *.tfstate.*
 .terraform.lock.hcl
 *.tfplan
+tfplan
 
 .vscode/
 .idea/
