@@ -1,0 +1,70 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: tech-challenge-api
+  EKS_CLUSTER_NAME: tech-challenge-eks
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Resolve RDS endpoint
+        id: rds
+        run: |
+          ENDPOINT=$(aws rds describe-db-instances --db-instance-identifier tech-challenge-comments-db --query 'DBInstances[0].Endpoint.Address' --output text)
+          echo "endpoint=$ENDPOINT" >> $GITHUB_OUTPUT
+
+      - name: Create/Update Kubernetes secret for DB
+        env:
+          RDS_ENDPOINT: ${{ steps.rds.outputs.endpoint }}
+        run: |
+          kubectl create secret generic db-secret \
+            --from-literal=host="$RDS_ENDPOINT" \
+            --from-literal=port="5432" \
+            --from-literal=name="commentsdb" \
+            --from-literal=user="comments_user" \
+            --from-literal=password="ChangeMeStrong123!" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy to EKS
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image }}
+        run: |
+          # Substituir a imagem no deployment
+          sed -i "s|tech-challenge-api:latest|$IMAGE_URI|g" k8s/manifests/deployment.yaml
+          
+          # Aplicar manifestos
+          kubectl apply -f k8s/manifests/

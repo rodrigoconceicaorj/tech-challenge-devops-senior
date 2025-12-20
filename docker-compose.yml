@@ -1,22 +1,35 @@
 version: "3.9"
 
 services:
-  postgres:
-    image: postgres:15-alpine
-    container_name: comments-db
-    environment:
-      POSTGRES_USER: commentsuser
-      POSTGRES_PASSWORD: commentspass
-      POSTGRES_DB: commentsdb
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: comments-db
+  #   environment:
+  #     POSTGRES_USER: commentsuser
+  #     POSTGRES_PASSWORD: commentspass
+  #     POSTGRES_DB: commentsdb
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U commentsuser"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   restart: unless-stopped
+
+  api:
+    build: ./api
+    container_name: tech-challenge-api
     ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U commentsuser"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - "5000:5000"
+    environment:
+      - DB_HOST=tech-challenge-comments-db.c6ngymy00woo.us-east-1.rds.amazonaws.com
+      - DB_PORT=5432
+      - DB_NAME=commentsdb
+      - DB_USER=comments_user
+      - DB_PASSWORD=ChangeMeStrong123!
     restart: unless-stopped
 
 volumes:
