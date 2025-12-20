@@ -1,5 +1,5 @@
 # Stage 1: Build and dependencies
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ WORKDIR /app
 
 # Install runtime system dependencies (libpq for psycopg2)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-5 \
+    libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user

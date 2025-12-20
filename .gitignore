@@ -9,9 +9,11 @@ env/
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl
+*.tfplan
 
 .vscode/
 .idea/
+.trae/
 
 .DS_Store
 Thumbs.db
