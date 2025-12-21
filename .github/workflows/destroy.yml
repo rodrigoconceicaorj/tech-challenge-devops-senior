@@ -7,22 +7,46 @@ env:
   AWS_REGION: us-east-1
   EKS_CLUSTER_NAME: tech-challenge-eks
   EKS_NODEGROUP_NAME: tech-challenge-ng
-  RDS_IDENTIFIER: tech-challenge-comments-db
+  RDS_IDENTIFIER: tech-challenge-comments-db-v2
   ECR_REPOSITORY: tech-challenge-api
+  TF_STATE_BUCKET: tech-challenge-terraform-state-408093795144
+  TF_LOCK_TABLE: tech-challenge-terraform-locks
 
 jobs:
   destroy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install AWS CLI and kubectl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "x86_64" ]; then
+            AWSCLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+          else
+            AWSCLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
+          fi
+          curl -sLo awscliv2.zip "$AWSCLI_URL"
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+          aws --version
+          KUBECTL_VERSION=$(curl -sL https://dl.k8s.io/release/stable.txt)
+          curl -sLo kubectl https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
       - name: Try delete Kubernetes resources
         continue-on-error: true
@@ -43,6 +67,7 @@ jobs:
         run: |
           set -e
           set -o pipefail
+          export AWS_DEFAULT_REGION="${{ env.AWS_REGION }}"
 
           CLUSTER="${{ env.EKS_CLUSTER_NAME }}"
           NODEGROUP="${{ env.EKS_NODEGROUP_NAME }}"
@@ -50,39 +75,119 @@ jobs:
           REGION="${{ env.AWS_REGION }}"
           REPO="${{ env.ECR_REPOSITORY }}"
 
+          # Delete nodegroup then wait until deleted
           aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP" || true
+          for i in {1..60}; do
+            STATUS=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP" --query 'nodegroup.status' --output text 2>/dev/null || echo "NOT_FOUND")
+            if [ "$STATUS" = "NOT_FOUND" ] || [ "$STATUS" = "DELETED" ]; then
+              break
+            fi
+            echo "Waiting for nodegroup deletion... ($STATUS)"
+            sleep 10
+          done
+
+          # Delete EKS cluster after nodegroup is gone
           aws eks delete-cluster --name "$CLUSTER" || true
+          for i in {1..60}; do
+            C_STATUS=$(aws eks describe-cluster --name "$CLUSTER" --query 'cluster.status' --output text 2>/dev/null || echo "NOT_FOUND")
+            if [ "$C_STATUS" = "NOT_FOUND" ] || [ "$C_STATUS" = "DELETING" ]; then
+              echo "Cluster state: $C_STATUS"
+              if [ "$C_STATUS" = "NOT_FOUND" ]; then break; fi
+            fi
+            sleep 10
+          done
+
+          aws rds modify-db-instance --db-instance-identifier "$RDS_ID" --no-deletion-protection --apply-immediately || true
           aws rds delete-db-instance --db-instance-identifier "$RDS_ID" --skip-final-snapshot || true
+          
+          echo "Waiting for RDS deletion..."
+          # Custom loop for RDS deletion (aws rds wait can be flaky or timeout)
+          for i in {1..60}; do
+            RDS_STATUS=$(aws rds describe-db-instances --db-instance-identifier "$RDS_ID" --query "DBInstances[0].DBInstanceStatus" --output text 2>/dev/null || echo "DELETED")
+            if [ "$RDS_STATUS" == "DELETED" ] || [ "$RDS_STATUS" == "Refused" ]; then
+              echo "RDS deleted."
+              break
+            fi
+            echo "Waiting for RDS deletion... ($RDS_STATUS)"
+            sleep 30
+          done
+
+          # Double check with wait command to be sure
+          aws rds wait db-instance-deleted --db-instance-identifier "$RDS_ID" || true
+          
           aws ecr delete-repository --repository-name "$REPO" --force || true
 
           VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=tech-challenge-vpc" --query "Vpcs[0].VpcId" --output text)
           if [ "$VPC_ID" != "None" ] && [ -n "$VPC_ID" ]; then
+            echo "VPC: $VPC_ID"
+            # Delete any ELB/NLBs in the VPC (sometimes linger after k8s svc delete)
+            LBS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" --output text 2>/dev/null || true)
+            for LB in $LBS; do
+              aws elbv2 delete-load-balancer --load-balancer-arn "$LB" || true
+            done
+            # Delete target groups in the VPC
+            TGS=$(aws elbv2 describe-target-groups --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn" --output text 2>/dev/null || true)
+            for TG in $TGS; do
+              aws elbv2 delete-target-group --target-group-arn "$TG" || true
+            done
+
             IGW_ID=$(aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPC_ID" --query "InternetGateways[0].InternetGatewayId" --output text)
             if [ "$IGW_ID" != "None" ] && [ -n "$IGW_ID" ]; then
-              aws ec2 detach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID" || true
-              aws ec2 delete-internet-gateway --internet-gateway-id "$IGW_ID" || true
+              echo "Internet Gateway: $IGW_ID"
             fi
 
-            NAT_ID=$(aws ec2 describe-nat-gateways --filter Name=vpc-id,Values=$VPC_ID --query "NatGateways[0].NatGatewayId" --output text)
-            if [ "$NAT_ID" != "None" ] && [ -n "$NAT_ID" ]; then
-              aws ec2 delete-nat-gateway --nat-gateway-id "$NAT_ID" || true
-            fi
+            NAT_IDS=$(aws ec2 describe-nat-gateways --filter Name=vpc-id,Values=$VPC_ID --query "NatGateways[].NatGatewayId" --output text)
+            for NAT in $NAT_IDS; do
+              if [ "$NAT" != "None" ] && [ -n "$NAT" ]; then
+                echo "Deleting NAT Gateway: $NAT"
+                aws ec2 delete-nat-gateway --nat-gateway-id "$NAT" || true
+              fi
+            done
+
+            # Wait until ALL NATs really gone
+            for NAT in $NAT_IDS; do
+              if [ "$NAT" != "None" ] && [ -n "$NAT" ]; then
+                for i in {1..60}; do
+                  NG_STATUS=$(aws ec2 describe-nat-gateways --nat-gateway-ids "$NAT" --query "NatGateways[0].State" --output text 2>/dev/null || echo "NOT_FOUND")
+                  if [ "$NG_STATUS" = "NOT_FOUND" ] || [ "$NG_STATUS" = "deleted" ]; then
+                    echo "NAT $NAT deleted."
+                    break
+                  fi
+                  echo "Waiting NAT $NAT deletion... ($NG_STATUS)"
+                  sleep 10
+                done
+              fi
+            done
 
             ALLOC_ID=$(aws ec2 describe-addresses --filters "Name=tag:Name,Values=tech-challenge-nat-eip" --query "Addresses[0].AllocationId" --output text)
             if [ "$ALLOC_ID" != "None" ] && [ -n "$ALLOC_ID" ]; then
+              echo "Releasing EIP: $ALLOC_ID"
               aws ec2 release-address --allocation-id "$ALLOC_ID" || true
             fi
 
-            # Delete route table associations
+            # Disassociate route table associations
             RT_IDS=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" --query "RouteTables[].RouteTableId" --output text)
             for RT in $RT_IDS; do
               ASSOC_IDS=$(aws ec2 describe-route-tables --route-table-ids "$RT" --query "RouteTables[].Associations[].RouteTableAssociationId" --output text)
               for ASSOC in $ASSOC_IDS; do
                 if [ "$ASSOC" != "None" ] && [ -n "$ASSOC" ]; then
-                  aws ec2 delete-route-table-association --association-id "$ASSOC" || true
+                  aws ec2 disassociate-route-table --association-id "$ASSOC" || true
                 fi
               done
             done
+
+            # Delete non-local routes first, then detach/delete IGW
+            for RT in $RT_IDS; do
+              DESTS=$(aws ec2 describe-route-tables --route-table-ids "$RT" --query "RouteTables[].Routes[?GatewayId!='local'].DestinationCidrBlock" --output text)
+              for DST in $DESTS; do
+                aws ec2 delete-route --route-table-id "$RT" --destination-cidr-block "$DST" || true
+              done
+            done
+
+            if [ "$IGW_ID" != "None" ] && [ -n "$IGW_ID" ]; then
+              aws ec2 detach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID" || true
+              aws ec2 delete-internet-gateway --internet-gateway-id "$IGW_ID" || true
+            fi
 
             # Delete route tables
             for RT in $RT_IDS; do
@@ -99,13 +204,84 @@ jobs:
               fi
             done
 
-            # Delete subnets by Name tag values
-            for SUB_NAME in tech-challenge-public-subnet tech-challenge-private-subnet-a tech-challenge-private-subnet-b; do
-              SUB_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=$SUB_NAME" --query "Subnets[0].SubnetId" --output text)
-              if [ "$SUB_ID" != "None" ] && [ -n "$SUB_ID" ]; then
-                aws ec2 delete-subnet --subnet-id "$SUB_ID" || true
+            # Delete Subnets
+            SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query "Subnets[].SubnetId" --output text)
+            for SUBNET in $SUBNET_IDS; do
+              if [ "$SUBNET" != "None" ] && [ -n "$SUBNET" ]; then
+                aws ec2 delete-subnet --subnet-id "$SUBNET" || true
               fi
             done
 
             aws ec2 delete-vpc --vpc-id "$VPC_ID" || true
           fi
+
+      - name: Validation Checklist
+        if: always()
+        run: |
+          echo "========================================================"
+          echo "           DESTRUCTION VALIDATION CHECKLIST             "
+          echo "========================================================"
+          echo "Verifying resources in region: ${{ env.AWS_REGION }}"
+          echo ""
+          
+          # EKS Cluster
+          CLUSTER_STATUS=$(aws eks describe-cluster --name "${{ env.EKS_CLUSTER_NAME }}" --query "cluster.status" --output text 2>/dev/null || echo "DELETED")
+          if [ "$CLUSTER_STATUS" == "DELETED" ]; then
+            echo "[OK] EKS Cluster: DELETED"
+            NG_STATUS="DELETED"
+          else
+            echo "[!!] EKS Cluster: ACTIVE (Status: $CLUSTER_STATUS)"
+            # Nodegroup (check only if cluster exists)
+            NG_STATUS=$(aws eks describe-nodegroup --cluster-name "${{ env.EKS_CLUSTER_NAME }}" --nodegroup-name "${{ env.EKS_NODEGROUP_NAME }}" --query "nodegroup.status" --output text 2>/dev/null || echo "DELETED")
+          fi
+
+          if [ "$NG_STATUS" == "DELETED" ]; then
+            echo "[OK] EKS Nodegroup: DELETED"
+          else
+            echo "[!!] EKS Nodegroup: ACTIVE (Status: $NG_STATUS)"
+          fi
+
+          # RDS
+          RDS_STATUS=$(aws rds describe-db-instances --db-instance-identifier "${{ env.RDS_IDENTIFIER }}" --query "DBInstances[0].DBInstanceStatus" --output text 2>/dev/null || echo "DELETED")
+          if [ "$RDS_STATUS" == "DELETED" ]; then
+            echo "[OK] RDS Instance: DELETED"
+          else
+            echo "[!!] RDS Instance: ACTIVE (Status: $RDS_STATUS)"
+          fi
+
+          # ECR
+          ECR_STATUS=$(aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" --query "repositories[0].repositoryName" --output text 2>/dev/null || echo "DELETED")
+          if [ "$ECR_STATUS" == "DELETED" ]; then
+            echo "[OK] ECR Repository: DELETED"
+          else
+            echo "[!!] ECR Repository: ACTIVE"
+          fi
+
+          # VPC
+          VPC_CHECK=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=tech-challenge-vpc" --query "Vpcs[0].VpcId" --output text 2>/dev/null || echo "None")
+          if [ "$VPC_CHECK" == "None" ]; then
+            echo "[OK] VPC (tech-challenge-vpc): DELETED"
+          else
+            echo "[!!] VPC (tech-challenge-vpc): ACTIVE ($VPC_CHECK)"
+          fi
+
+          # NAT Gateway
+          NAT_CHECK=$(aws ec2 describe-nat-gateways --filter "Name=tag:Name,Values=tech-challenge-nat-gw" --query "NatGateways[?State!='deleted'].NatGatewayId" --output text 2>/dev/null)
+          if [ -z "$NAT_CHECK" ]; then
+            echo "[OK] NAT Gateway: DELETED"
+          else
+            echo "[!!] NAT Gateway: ACTIVE ($NAT_CHECK)"
+          fi
+
+          # Elastic IP
+          EIP_CHECK=$(aws ec2 describe-addresses --filters "Name=tag:Name,Values=tech-challenge-nat-eip" --query "Addresses[0].AllocationId" --output text 2>/dev/null || echo "None")
+          if [ "$EIP_CHECK" == "None" ]; then
+            echo "[OK] Elastic IP (NAT): DELETED"
+          else
+            echo "[!!] Elastic IP (NAT): ACTIVE ($EIP_CHECK)"
+          fi
+          
+          echo "========================================================"
+          echo " If all items are [OK], your cloud environment is clean."
+          echo "========================================================"
+
