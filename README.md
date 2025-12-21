@@ -6,53 +6,48 @@
 - **RDS**: Banco de dados PostgreSQL Gerenciado (privado)
 - **Terraform**: Infraestrutura como Código
 - **GitHub Actions**: Pipeline CI/CD completo
-
-## Como rodar localmente
-
+-
+## Como rodar localmente (dev)
+ 
 ### Pré-requisitos
-- Docker & Docker Compose
-- Python 3.11+ (opcional, para rodar sem container)
-
-### Execução via Docker Compose (Recomendado)
-A maneira mais simples de subir a aplicação completa (API + Banco de Dados) localmente:
-
-1. Clone o repositório
-2. Execute o comando na raiz do projeto:
-```bash
-docker-compose up --build
-```
-3. A API estará disponível em `http://localhost:5000`
-
-### Execução Manual (Python venv)
-
-1. Crie e ative ambiente virtual:
-   - Windows: `python -m venv venv; .\venv\Scripts\Activate.ps1`
-   - Linux/Mac: `python -m venv venv; source venv/bin/activate`
-
-2. Instale dependências:
-```bash
-pip install -r api/requirements.txt
-```
-
-3. Configure as variáveis de ambiente (crie um arquivo `.env` ou exporte no terminal):
-```env
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=commentsdb
-DB_USER=commentsuser
-DB_PASSWORD=commentspass
-```
-
-4. Suba apenas o banco via Docker:
-```bash
-docker-compose up -d postgres
-```
-
-5. Rode a API:
-```bash
-python api/app.py
-```
-
+- Python 3.11+
+- Pip e venv
+ 
+### Passos
+1. Criar e ativar venv:
+   - Windows:
+     ```
+     python -m venv venv
+     .\venv\Scripts\Activate.ps1
+     ```
+   - Linux/Mac:
+     ```
+     python -m venv venv
+     source venv/bin/activate
+     ```
+2. Instalar dependências:
+   ```
+   pip install -r api/requirements.txt
+   ```
+3. Configurar variáveis (exemplo banco local ou remoto):
+   ```
+   set DB_HOST=localhost
+   set DB_PORT=5432
+   set DB_NAME=commentsdb
+   set DB_USER=comments_user
+   set DB_PASSWORD=commentspass
+   ```
+   Linux/Mac: use `export VAR=valor`.
+4. Executar API:
+   ```
+   python api/app.py
+   ```
+5. Endpoints:
+   - `GET http://localhost:5000/health`
+   - `POST http://localhost:5000/api/comment/new`
+   - `GET http://localhost:5000/api/comment/list/{content_id}`
+   - `GET http://localhost:5000/metrics`
+ 
 ## Provisionamento na AWS (Terraform)
 
 A infraestrutura é gerenciada via Terraform na pasta `infra/terraform`.
@@ -77,9 +72,12 @@ terraform apply
 ## CI/CD (GitHub Actions)
 
 O pipeline automatizado cobre:
-1. **Build**: Construção da imagem Docker.
-2. **Package**: Push da imagem para o ECR.
-3. **Deploy**: Atualização dos manifestos Kubernetes no EKS e criação do segredo de DB.
+1. **Test**: Executa testes unitários (`pytest`) da API.
+2. **Scan (IaC)**: Checkov (Terraform).
+3. **Build**: Construção da imagem Docker.
+4. **Scan (Container)**: Trivy (CRITICAL/HIGH).
+5. **Package**: Push da imagem para o ECR.
+6. **Deploy**: Atualização dos manifestos Kubernetes no EKS e criação/atualização do segredo de DB.
 
 Para acionar, basta fazer um push para a branch `main`.
 
@@ -119,3 +117,47 @@ Para acionar, basta fazer um push para a branch `main`.
 3. `kubectl get svc comments-api-svc` e acessar `EXTERNAL-IP`:
    - `GET /health`, `POST /api/comment/new`, `GET /api/comment/list/{content_id}`, `GET /metrics`.
 4. Encerrar custos com `Destroy Infra` (Actions) ou `terraform destroy`.
+5. Evidências operacionais e comandos: veja `COMMENTS.md` (seção "Evidências Operacionais").
+
+### Comandos úteis
+- Imagem do deployment:
+  ```
+  kubectl get deployment comments-api -o jsonpath='{.spec.template.spec.containers[0].image}'
+  ```
+- Status de rollout:
+  ```
+  kubectl rollout status deployment/comments-api --timeout=180s
+  ```
+- Pods do app:
+  ```
+  kubectl get pods -l app=comments-api -o wide
+  ```
+- Hostname do LoadBalancer:
+  ```
+  kubectl get svc comments-api-svc -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+  ```
+- Health check:
+  ```
+  curl http://<EXTERNAL-HOSTNAME>/health
+  ```
+
+## Rollback
+- Ver histórico:
+  ```
+  kubectl rollout history deployment/comments-api
+  ```
+- Desfazer para revisão anterior:
+  ```
+  kubectl rollout undo deployment/comments-api
+  ```
+
+## Gestão de Segredos
+- Atual: Kubernetes Secret (`db-secret`) gerado pelo pipeline com endpoint do RDS e credenciais.
+- Evolução: AWS Secrets Manager + External Secrets Operator (planejado) para reduzir acoplamento e reforçar RBAC/IRSA.
+
+## Transparência (tempo, referências)
+- Tempo gasto: ~2 dias úteis em ajustes, validações e automações; ~1 dia em provisionamento/depuração AWS.
+- Referências:
+  - Documentação AWS (EKS, RDS, ECR, VPC)
+  - Kubernetes Probes e HPA
+  - Checkov e Trivy (ações oficiais)
