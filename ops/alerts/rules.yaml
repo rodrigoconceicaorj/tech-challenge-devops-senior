@@ -1,0 +1,19 @@
+groups:
+  - name: comments-api-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: sum(rate(flask_http_request_total{status=~"5.."}[5m])) > 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Erro 5xx elevado na Comments API"
+          description: "Taxa de respostas 5xx maior que 1 req/s por 5m"
+      - alert: HighLatencyP95
+        expr: histogram_quantile(0.95, sum(rate(flask_http_request_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latência p95 elevada"
+          description: "Latência p95 acima de 500ms por 5m"

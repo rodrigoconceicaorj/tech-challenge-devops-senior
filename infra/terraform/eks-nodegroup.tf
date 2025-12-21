@@ -48,8 +48,8 @@ resource "aws_eks_node_group" "this" {
   }
 
   instance_types = ["t3.small"]
-  disk_size      = 30
-  capacity_type  = "ON_DEMAND"
+  disk_size      = 20
+  capacity_type  = "SPOT"
 
   tags = {
     Name = "tech-challenge-ng"

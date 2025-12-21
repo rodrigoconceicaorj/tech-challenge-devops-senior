@@ -1,26 +1,22 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: comments-api
-  labels:
-    app: comments-api
+  name: db-init-job
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-succeeded
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: comments-api
   template:
     metadata:
       labels:
-        app: comments-api
+        app: db-init
     spec:
-      serviceAccountName: default
+      restartPolicy: OnFailure
       containers:
-        - name: comments-api
+        - name: db-init
           image: 408093795144.dkr.ecr.us-east-1.amazonaws.com/tech-challenge-api:v1
-          imagePullPolicy: Always
-          ports:
-            - containerPort: 5000
+          command: ["python", "init_db.py"]
           env:
             - name: DB_HOST
               valueFrom:
@@ -47,22 +43,3 @@ spec:
                 secretKeyRef:
                   name: db-secret
                   key: password
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 5000
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 5000
-            initialDelaySeconds: 30
-            periodSeconds: 30
